@@ -1,4 +1,4 @@
-name: Release workflow
+name: Release
 
 on:
   workflow_dispatch:
@@ -27,5 +27,5 @@ jobs:
       - name: Build
         run: python3 -m build
 
-      - name: List files
-        run: ls dist/
+      - name: List shas
+        run: sha256sum dist/*
