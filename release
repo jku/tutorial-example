@@ -1,0 +1,76 @@
+#!/usr/bin/env python
+
+import os
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+from typing import List, Optional
+
+# unused: will be called with subprocess
+import build
+import sigstore
+
+def _run(cmd: List[str]):
+    if os.environ.get('DEBUG'):
+        subprocess.run(cmd, check=True)
+    else:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+def main(args: List[str]) -> Optional[str]:
+    if len(args) != 1 or args[0] not in ["sign", "verify"]:
+        return f"Invalid arguments: expecting 'sign' or 'verify'"
+
+    orig_dir = os.path.dirname(os.path.abspath(__file__))
+    with TemporaryDirectory() as src_dir:
+        print("Building...")
+        # fresh git clone: this prevents uncommitted files from affecting build
+        _run(["git", "clone", "--quiet", orig_dir, src_dir])
+        _run(["python3", "-m", "build", src_dir])
+        artifacts = os.listdir(f"{src_dir}/dist/")
+
+        if args[0] == "sign":
+            print("Signing (please login to sigstore with GitHub)...")
+            cmd = ["python3", "-m", "sigstore", "sign"]
+            for artifact in artifacts:
+                cmd.append(f"{src_dir}/dist/{artifact}")
+            _run(cmd)
+            for artifact in artifacts:
+                os.replace(f"{src_dir}/dist/{artifact}.sig", f"{orig_dir}/signatures/{artifact}.sig")
+                os.replace(f"{src_dir}/dist/{artifact}.crt", f"{orig_dir}/signatures/{artifact}.crt")
+            print(f"✅ Created new signatures and certificates in signatures/")
+        else:
+            print("Verifying signatures...")
+            base_cmd = ["python3", "-m", "sigstore", "verify", "--cert-oidc-issuer", "https://github.com/login/oauth"]
+            verified_by = None
+
+            with open(f"{orig_dir}/signatures/SIGNERS", "r") as f:
+                signers = [line.strip() for line in f if not line.startswith("#")]
+
+            for identity in signers:
+                try:
+                    for artifact in artifacts:
+                        crt = f"{orig_dir}/signatures/{artifact}.crt"
+                        sig = f"{orig_dir}/signatures/{artifact}.sig"
+                        if (not os.path.exists(crt) or not os.path.exists(sig)):
+                            return(f"Could not find sig or cert for {artifact}")
+
+                        cmd = base_cmd + [
+                            "--cert-email", identity,
+                            "--certificate", crt,
+                            "--signature", sig,
+                            f"{src_dir}/dist/{artifact}"
+                        ]
+                        _run(cmd)
+                    # All artifacts verified succesfully by this identity
+                    verified_by = identity
+                    break
+                except subprocess.CalledProcessError:
+                    # Could not verify signature by this identity
+                    pass
+            if not verified_by:
+                return "Failed to verify release artifacts"
+
+            print (f"✅ Release artifacts are signed by {identity}")
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
