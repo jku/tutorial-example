@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import glob
 import os
 import subprocess
 import sys
@@ -9,7 +10,11 @@ from typing import List, Optional
 import sigstore
 
 ORIG_DIR = os.path.dirname(os.path.abspath(__file__))
+SIG_DIR = f"{ORIG_DIR}/signatures"
+DEFAULT_DIST_DIR = f"{ORIG_DIR}/dist"
+
 ISSUER = "https://github.com/login/oauth"
+PYPI_PROJECT = "tutorial_example_mvrachev"
 
 def _run(cmd: List[str]):
     if os.environ.get('DEBUG'):
@@ -17,10 +22,16 @@ def _run(cmd: List[str]):
     else:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
+def _find_artifacts(version: str, dist_dir: str) -> List[str]:
+    """Return artifact filenames for 'version' in 'dist_dir'"""
+    artifacts = []
+    artifacts.extend(glob.glob(f"{dist_dir}/{PYPI_PROJECT}-{version}.tar.gz"))
+    artifacts.extend(glob.glob(f"{dist_dir}/{PYPI_PROJECT}-{version}-*.whl"))
+    return [os.path.basename(artifact) for artifact in artifacts]
+
 def _sign(version: str, dist_dir: str) -> Optional[str]:
-    # TODO better version check
-    artifacts = [f for f in os.listdir(dist_dir) if version in f]
-    if len(artifacts) !=2:
+    artifacts = _find_artifacts(version, dist_dir)
+    if len(artifacts) != 2:
         return f"Expected 2 artifacts for {version}, found {artifacts}"
 
     cmd = ["python3", "-m", "sigstore", "sign"]
@@ -29,25 +40,22 @@ def _sign(version: str, dist_dir: str) -> Optional[str]:
     print("Signing (please login to sigstore with GitHub)...")
     _run(cmd)
     for artifact in artifacts:
-        crt = f"{ORIG_DIR}/signatures/{artifact}.crt"
-        sig = f"{ORIG_DIR}/signatures/{artifact}.sig"
-        os.replace(f"{dist_dir}/{artifact}.sig", sig)
-        os.replace(f"{dist_dir}/{artifact}.crt", crt)
+        os.replace(f"{dist_dir}/{artifact}.sig", f"{SIG_DIR}/{artifact}.sig")
+        os.replace(f"{dist_dir}/{artifact}.crt", f"{SIG_DIR}/{artifact}.crt")
         print(f"Signed {artifact}")
 
     print(f"✅ Signed release {version}")
 
 def _verify(version: str, dist_dir: str, identity: str) -> Optional[str]:
-    # TODO better version check
-    artifacts = [f for f in os.listdir(dist_dir) if version in f]
-    if len(artifacts) !=2:
+    artifacts = _find_artifacts(version, dist_dir)
+    if len(artifacts) != 2:
         return f"Expected 2 artifacts for {version}, found {artifacts}"
 
     base_cmd = ["python3", "-m", "sigstore", "verify", "--cert-oidc-issuer", ISSUER]
     try:
         for artifact in artifacts:
-            crt = f"{ORIG_DIR}/signatures/{artifact}.crt"
-            sig = f"{ORIG_DIR}/signatures/{artifact}.sig"
+            crt = f"{SIG_DIR}/{artifact}.crt"
+            sig = f"{SIG_DIR}/{artifact}.sig"
             if (not os.path.exists(crt) or not os.path.exists(sig)):
                 return f"Could not find sig or cert for {artifact}"
 
@@ -67,9 +75,9 @@ def _verify(version: str, dist_dir: str, identity: str) -> Optional[str]:
 
 def main(args: List[str]) -> Optional[str]:
     if args[0] == "sign" and len(args) == 2:
-        return _sign(args[1], f"{ORIG_DIR}/dist/")
+        return _sign(args[1], DEFAULT_DIST_DIR)
     elif args[0] == "verify" and len(args) == 3:
-        return _verify(args[1], f"{ORIG_DIR}/dist/", args[2])
+        return _verify(args[1], DEFAULT_DIST_DIR, args[2])
     else:
         return f"Invalid arguments: expecting 'sign <version>' or 'verify <version> <email>'"
 
