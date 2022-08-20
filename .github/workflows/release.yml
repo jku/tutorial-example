@@ -24,13 +24,15 @@ jobs:
           python-version: '3.9'
 
       - name: Install build dependency
-        run: python3 -m pip install build
+        run: python3 -m pip install build sigstore
 
       - name: Build
         run: python3 -m build
 
-      - name: List shas
-        run: sha256sum dist/*
+      - name: Verify release signature
+        run: |
+          version=${GITHUB_REF#refs/tags/v}
+          ./release verify $version mvrachev@vmware.com
 
       # Takes the "dist" directory and stores it as "build-artifacts", so that
       # in the next job we can access those files. Pass data between 2 steps.
