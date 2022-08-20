@@ -3,12 +3,13 @@
 import os
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
 from typing import List, Optional
 
 # unused: will be called with subprocess
-import build
 import sigstore
+
+ORIG_DIR = os.path.dirname(os.path.abspath(__file__))
+ISSUER = "https://github.com/login/oauth"
 
 def _run(cmd: List[str]):
     if os.environ.get('DEBUG'):
@@ -16,87 +17,61 @@ def _run(cmd: List[str]):
     else:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
-def _sign(version: str) -> Optional[str]:
-    orig_dir = os.path.dirname(os.path.abspath(__file__))
-    with TemporaryDirectory() as src_dir:
-        print("Building from current commit...")
-        # fresh git clone: this prevents uncommitted files from affecting build
-        _run(["git", "clone", "--quiet", orig_dir, src_dir])
-        _run(["python3", "-m", "build", src_dir])
-        artifacts = os.listdir(f"{src_dir}/dist/")
+def _sign(version: str, dist_dir: str) -> Optional[str]:
+    # TODO better version check
+    artifacts = [f for f in os.listdir(dist_dir) if version in f]
+    if len(artifacts) !=2:
+        return f"Expected 2 artifacts for {version}, found {artifacts}"
 
-        print("Signing (please login to sigstore with GitHub)...")
-        cmd = ["python3", "-m", "sigstore", "sign"]
+    cmd = ["python3", "-m", "sigstore", "sign"]
+    for artifact in artifacts:
+        cmd.append(f"{dist_dir}/{artifact}")
+    print("Signing (please login to sigstore with GitHub)...")
+    _run(cmd)
+    for artifact in artifacts:
+        crt = f"{ORIG_DIR}/signatures/{artifact}.crt"
+        sig = f"{ORIG_DIR}/signatures/{artifact}.sig"
+        os.replace(f"{dist_dir}/{artifact}.sig", sig)
+        os.replace(f"{dist_dir}/{artifact}.crt", crt)
+        print(f"Signed {artifact}")
+
+    print(f"✅ Signed release {version}")
+
+def _verify(version: str, dist_dir: str, identity: str) -> Optional[str]:
+    # TODO better version check
+    artifacts = [f for f in os.listdir(dist_dir) if version in f]
+    if len(artifacts) !=2:
+        return f"Expected 2 artifacts for {version}, found {artifacts}"
+
+    base_cmd = ["python3", "-m", "sigstore", "verify", "--cert-oidc-issuer", ISSUER]
+    try:
         for artifact in artifacts:
-            # sanity check
-            if version not in artifact:
-                return f"Built artifact {artifact} does not contain version {version}"
-            cmd.append(f"{src_dir}/dist/{artifact}")
-        _run(cmd)
-        for artifact in artifacts:
-            crt = f"{orig_dir}/signatures/{artifact}.crt"
-            sig = f"{orig_dir}/signatures/{artifact}.sig"
-            os.replace(f"{src_dir}/dist/{artifact}.sig", sig)
-            os.replace(f"{src_dir}/dist/{artifact}.crt", crt)
-            _run(["git", "add", crt, sig])
-            print(f"Signed {artifact}")
+            crt = f"{ORIG_DIR}/signatures/{artifact}.crt"
+            sig = f"{ORIG_DIR}/signatures/{artifact}.sig"
+            if (not os.path.exists(crt) or not os.path.exists(sig)):
+                return f"Could not find sig or cert for {artifact}"
 
-        _run(["git", "commit", "-m", f"'Add signatures for version {version}...'"])
-        _run(["git", "tag", "-m", "'Release {version}'", f"v{version}"])
-        print(f"✅ Committed signatures and tagged release {version}")
+            cmd = base_cmd + [
+                "--cert-email", identity,
+                "--certificate", crt,
+                "--signature", sig,
+                f"{dist_dir}/{artifact}"
+            ]
+            _run(cmd)
+            print(f"{artifact} signed by {identity}")
+    except subprocess.CalledProcessError:
+        return f"No valid signatures found for {identity}"
 
-def _verify(version: str) -> Optional[str]:
-    orig_dir = os.path.dirname(os.path.abspath(__file__))
-    with TemporaryDirectory() as src_dir:
-        print(f"Building {version}...")
-        # fresh git clone: this prevents uncommitted files from affecting build
-        _run(["git", "clone", "--quiet", "--branch", f"v{version}", orig_dir, src_dir])
-        _run(["python3", "-m", "build", src_dir])
-        artifacts = os.listdir(f"{src_dir}/dist/")
-
-        print("Verifying signatures...")
-        base_cmd = ["python3", "-m", "sigstore", "verify", "--cert-oidc-issuer", "https://github.com/login/oauth"]
-        verified_by = None
-
-        # Use SIGNERS and signatures from current commit
-        with open(f"{orig_dir}/signatures/SIGNERS", "r") as f:
-            signers = [line.strip() for line in f if not line.startswith("#")]
-
-        for identity in signers:
-            try:
-                for artifact in artifacts:
-                    crt = f"{orig_dir}/signatures/{artifact}.crt"
-                    sig = f"{orig_dir}/signatures/{artifact}.sig"
-                    if (not os.path.exists(crt) or not os.path.exists(sig)):
-                        return(f"Could not find sig or cert for {artifact}")
-
-                    cmd = base_cmd + [
-                        "--cert-email", identity,
-                        "--certificate", crt,
-                        "--signature", sig,
-                        f"{src_dir}/dist/{artifact}"
-                    ]
-                    _run(cmd)
-                # All artifacts verified succesfully by this identity
-                verified_by = identity
-                break
-            except subprocess.CalledProcessError:
-                # Could not verify signature by this identity
-                pass
-        if not verified_by:
-            return "❌ Failed to verify release artifacts"
-
-        print (f"✅ {version} release signed by {verified_by}")
+    # All artifacts verified succesfully by this identity
+    print (f"✅ {version} release artifacts signed by {identity}")
 
 def main(args: List[str]) -> Optional[str]:
-    if len(args) != 2 or args[0] not in ["sign", "verify"]:
-        return f"Invalid arguments: expecting 'sign <version>' or 'verify <version>'"
-
-    if args[0] == "sign":
-        return _sign(args[1])
+    if args[0] == "sign" and len(args) == 2:
+        return _sign(args[1], f"{ORIG_DIR}/dist/")
+    elif args[0] == "verify" and len(args) == 3:
+        return _verify(args[1], f"{ORIG_DIR}/dist/", args[2])
     else:
-        return _verify(args[1])
-
+        return f"Invalid arguments: expecting 'sign <version>' or 'verify <version> <email>'"
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
