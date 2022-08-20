@@ -2,8 +2,10 @@
 
 import glob
 import os
+import shutil
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 from typing import List, Optional
 
 # unused: will be called with subprocess
@@ -51,26 +53,24 @@ def _verify(version: str, dist_dir: str, identity: str) -> Optional[str]:
     if len(artifacts) != 2:
         return f"Expected 2 artifacts for {version}, found {artifacts}"
 
-    base_cmd = ["python3", "-m", "sigstore", "verify", "--cert-oidc-issuer", ISSUER]
-    try:
+    # Copy artifacts, certs and sigs to same directory so we can call sigstore once only
+    cmd = ["python3", "-m", "sigstore", "verify", "--cert-oidc-issuer", ISSUER, "--cert-email", identity]
+    with TemporaryDirectory() as tempdir:
         for artifact in artifacts:
             crt = f"{SIG_DIR}/{artifact}.crt"
             sig = f"{SIG_DIR}/{artifact}.sig"
             if (not os.path.exists(crt) or not os.path.exists(sig)):
                 return f"Could not find sig or cert for {artifact}"
-
-            cmd = base_cmd + [
-                "--cert-email", identity,
-                "--certificate", crt,
-                "--signature", sig,
-                f"{dist_dir}/{artifact}"
-            ]
+            shutil.copy(crt, tempdir)
+            shutil.copy(sig, tempdir)
+            shutil.copy(f"{dist_dir}/{artifact}", tempdir)
+            cmd.append(f"{tempdir}/{artifact}")
+            print(f"Verifying {artifact}...")
+        try:
             _run(cmd)
-            print(f"{artifact} signed by {identity}")
-    except subprocess.CalledProcessError:
-        return f"No valid signatures found for {identity}"
+        except subprocess.CalledProcessError:
+            return f"No valid signatures found for {identity}"
 
-    # All artifacts verified succesfully by this identity
     print (f"✅ {version} release artifacts signed by {identity}")
 
 def main(args: List[str]) -> Optional[str]:
